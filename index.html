@@ -142,70 +142,112 @@
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
-    <script>
-        // Variables globales
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ideaton-pixeles-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        
+        let app, db, auth, userId;
         let map;
         let tempPopup = null;
         let selectedLatLng = null;
-        
-        // Regla: 1 píxel por persona (estado en memoria para esta sesión)
         let hasVoted = false;
-        
-        // Estado de la aplicación
-        let pixelsData = [];
+        let pixelsData = {}; // Evitamos duplicados por ID
 
-        // Exponer funciones al window para botones generados dinámicamente
+        // Exponer funciones al window para los botones HTML
         window.proceedToProposal = proceedToProposal;
         window.cancelTempPixel = cancelTempPixel;
+        window.openModal = openModal;
+        window.closeModal = closeModal;
+        window.saveProposal = saveProposal;
+
+        async function initApp() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (token) {
+                    await signInWithCustomToken(auth, token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser?.uid || crypto.randomUUID();
+                
+                initMap();
+                listenToPixels();
+            } catch (error) {
+                console.error("Error al iniciar la base de datos:", error);
+                userId = crypto.randomUUID();
+                initMap();
+            }
+        }
 
         function initMap() {
-            // Centrado en La Cañada, Córdoba
             const cordobaCenter = [-31.4170, -64.1895]; 
-            
-            // Definir los límites (Bounding Box) de Córdoba Capital
             const cordobaBounds = [
-                [-31.4900, -64.2900], // Suroeste (SW)
-                [-31.3100, -64.0800]  // Noreste (NE)
+                [-31.4900, -64.2900],
+                [-31.3100, -64.0800]
             ];
             
             map = L.map('map', {
                 zoomControl: false,
                 tap: true, 
-                maxBounds: cordobaBounds, // Limita el paneo a Córdoba
-                maxBoundsViscosity: 1.0,  // Borde sólido
-                minZoom: 12               // Impide alejar demasiado
+                maxBounds: cordobaBounds, 
+                maxBoundsViscosity: 1.0,  
+                minZoom: 12               
             }).setView(cordobaCenter, 16);
 
             L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-            // Servidor de OpenStreetMap (Sin API Key, 100% Libre y gratuito)
             L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                attribution: '&copy; OpenStreetMap contributors',
                 maxZoom: 19
             }).addTo(map);
 
-            // Evento principal: Tocar el mapa
             map.on('click', handleMapClick);
+        }
+
+        function listenToPixels() {
+            if (!db) return;
+            const pixelsRef = collection(db, 'artifacts', appId, 'public', 'data', 'pixels');
             
-            // Cargar datos de ejemplo apagados
-            addInitialExamples();
+            onSnapshot(query(pixelsRef), (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added" || change.type === "modified") {
+                        const pixel = change.doc.data();
+                        pixel.id = change.doc.id;
+                        
+                        if (!pixelsData[pixel.id]) {
+                            pixelsData[pixel.id] = pixel;
+                            renderPixelOnMap(pixel);
+                            
+                            // Si detecto que este píxel bajado de la nube fue creado por mí, bloqueo la opción de volver a votar
+                            if (pixel.userId === userId) {
+                                hasVoted = true;
+                                updateUIForVotedUser();
+                            }
+                        }
+                    }
+                });
+            }, (error) => {
+                console.error("Error escuchando cambios:", error);
+            });
         }
 
         function handleMapClick(e) {
-            // Verificar si el usuario ya votó
             if (hasVoted) {
                 showToast('Ya has plantado tu píxel. Solo se permite uno por persona.', true);
                 return;
             }
 
             selectedLatLng = e.latlng;
+            if (tempPopup) map.removeLayer(tempPopup);
 
-            // Remover el popup temporal anterior si existiera
-            if (tempPopup) {
-                map.removeLayer(tempPopup);
-            }
-
-            // Crear popup de confirmación con botón "Ok" (tilde)
             const confirmationHtml = `
                 <div class="text-center p-1">
                     <button onclick="window.proceedToProposal()" class="w-12 h-12 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full flex items-center justify-center shadow-lg transition-transform transform hover:scale-105 mx-auto cursor-pointer">
@@ -223,7 +265,6 @@
             .setContent(confirmationHtml)
             .openOn(map);
 
-            // Centrar suavemente en el punto seleccionado
             map.panTo(selectedLatLng);
         }
 
@@ -263,41 +304,62 @@
                 modal.classList.add('hidden');
                 modal.classList.remove('flex');
             }, 200);
-
             cancelTempPixel();
         }
 
-        function saveProposal() {
+        async function saveProposal() {
+            if (!userId) {
+                showToast('Hubo un error de conexión, intenta recargar.', true);
+                return;
+            }
+
             const desc = document.getElementById('pixel-desc').value.trim();
+            const newPixelId = Date.now().toString() + Math.floor(Math.random() * 1000);
             
             const newPixel = {
-                id: Date.now().toString(),
+                id: newPixelId,
                 lat: selectedLatLng.lat,
                 lng: selectedLatLng.lng,
                 description: desc,
-                timestamp: new Date(),
-                isMine: true
+                timestamp: new Date().toISOString(),
+                userId: userId 
             };
 
-            pixelsData.push(newPixel);
-            renderPixelOnMap(newPixel);
-            
-            // Bloquear futuros votos
+            // Bloqueo optimista inmediato
             hasVoted = true;
-            document.getElementById('user-status').innerText = 'Píxel Plantado';
-            document.getElementById('user-status').className = 'bg-gray-100 text-gray-500 text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider';
-            
+            updateUIForVotedUser();
             cancelTempPixel();
             closeModal();
-            
-            showToast('¡Tu píxel ha sido plantado en la ciudad!');
+
+            if (db) {
+                try {
+                    const pixelsRef = collection(db, 'artifacts', appId, 'public', 'data', 'pixels');
+                    const docRef = doc(pixelsRef, newPixel.id);
+                    await setDoc(docRef, newPixel);
+                    showToast('¡Tu píxel fue guardado y compartido con todos!');
+                } catch (error) {
+                    console.error("Error guardando:", error);
+                    showToast('Hubo un error al guardar tu píxel.', true);
+                    hasVoted = false; // Revertir si falla el guardado
+                }
+            } else {
+                pixelsData[newPixel.id] = newPixel;
+                renderPixelOnMap(newPixel);
+                showToast('¡Tu píxel ha sido plantado!');
+            }
         }
 
-        // Renderiza los marcadores definitivos
+        function updateUIForVotedUser() {
+            document.getElementById('user-status').innerText = 'Píxel Plantado';
+            document.getElementById('user-status').className = 'bg-gray-100 text-gray-500 text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider';
+        }
+
         function renderPixelOnMap(pixel) {
-            // Añadir clase "placed" para que se vea apagado inicialmente
+            const isMine = pixel.userId === userId;
+            
             const icon = L.divIcon({
-                className: `pixel-marker placed`,
+                // Si el píxel es tuyo, le agrega un borde verde tenue para diferenciarlo ligeramente
+                className: `pixel-marker placed ${isMine ? 'ring-2 ring-green-400 ring-offset-1' : ''}`,
                 iconSize: [24, 24],
                 iconAnchor: [12, 12]
             });
@@ -310,8 +372,8 @@
             
             const popupContent = `
                 <div class="p-2 min-w-[160px] max-w-[200px]">
-                    <div class="text-xs font-bold mb-2 border-b border-gray-200 pb-1 text-indigo-700">
-                        <i class="fa-solid fa-location-dot"></i> Píxel Intervenido
+                    <div class="text-xs font-bold mb-2 border-b border-gray-200 pb-1 ${isMine ? 'text-green-600' : 'text-indigo-700'}">
+                        <i class="fa-solid ${isMine ? 'fa-user-check' : 'fa-location-dot'}"></i> ${isMine ? 'Tu Píxel' : 'Píxel Intervenido'}
                     </div>
                     <div class="text-sm text-gray-700 italic leading-snug">${displayDesc}</div>
                 </div>
@@ -319,7 +381,6 @@
             
             marker.bindPopup(popupContent, { closeButton: false });
             
-            // Eventos para cambiar la opacidad (Se "enciende" al presionarlo)
             marker.on('popupopen', function() {
                 this.getElement().classList.add('active');
             });
@@ -351,28 +412,7 @@
             }, 3500);
         }
 
-        // Datos iniciales apagados (de otros usuarios)
-        function addInitialExamples() {
-            const exampleData = [
-                {
-                    id: '1', lat: -31.4222339, lng: -64.1927769,
-                    description: 'Asiento circular abrazando la Tipa con luz cinética.',
-                    timestamp: new Date(Date.now() - 1000 * 60 * 30), isMine: false
-                },
-                {
-                    id: '2', lat: -31.4262805, lng: -64.19132591,
-                    description: 'Baldosa interactiva de Aníbal Montes para recordar la historia.',
-                    timestamp: new Date(Date.now() - 1000 * 60 * 120), isMine: false
-                }
-            ];
-
-            exampleData.forEach(p => {
-                pixelsData.push(p);
-                renderPixelOnMap(p);
-            });
-        }
-
-        window.addEventListener('DOMContentLoaded', initMap);
+        window.addEventListener('DOMContentLoaded', initApp);
     </script>
 </body>
 </html>
