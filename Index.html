@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Proyecto Píxeles - Participación Ciudadana</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; overflow: hidden; margin: 0; padding: 0; touch-action: none; }
+        
+        /* Contenedor del mapa de fondo */
+        #map { height: 100vh; width: 100vw; z-index: 1; position: absolute; top: 0; left: 0; }
+        
+        /* Estilos base para marcadores de Píxeles */
+        .pixel-marker {
+            width: 24px;
+            height: 24px;
+            border: 2px solid white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.3);
+            transition: all 0.3s ease;
+            cursor: pointer;
+            border-radius: 4px;
+            background-color: #4f46e5; /* Índigo por defecto para todos los píxeles */
+        }
+
+        /* Píxeles ya colocados: tono más apagado por defecto */
+        .pixel-marker.placed {
+            opacity: 0.6;
+            transform: scale(0.85);
+            filter: saturate(60%);
+        }
+
+        /* Píxel seleccionado/presionado: vuelve a su color y tamaño normal */
+        .pixel-marker.placed.active, .pixel-marker.placed:hover {
+            opacity: 1;
+            transform: scale(1.1);
+            filter: saturate(100%);
+            z-index: 1000 !important;
+        }
+
+        /* Utilidades para ocultar scrollbars */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* Capas de Interfaz de Usuario para no bloquear el mapa */
+        .ui-layer { z-index: 1000; pointer-events: none; }
+        .ui-interactive { pointer-events: auto; }
+
+        /* Ajustes de popups de Leaflet para la confirmación */
+        .leaflet-popup-content-wrapper { border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); }
+        .leaflet-popup-content { margin: 10px 14px; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <!-- Mapa Base -->
+    <div id="map"></div>
+
+    <!-- Panel de UI Flotante -->
+    <div class="ui-layer absolute inset-0 flex flex-col justify-between p-4 md:p-6 pb-8 md:pb-6 pointer-events-none">
+        
+        <!-- Header Top -->
+        <div class="w-full max-w-md mx-auto md:mx-0 bg-white/95 backdrop-blur-md rounded-2xl shadow-xl p-4 ui-interactive border border-gray-200/50">
+            <div class="flex justify-between items-center mb-3">
+                <h1 class="text-xl md:text-2xl font-bold text-gray-900 tracking-tight leading-none">
+                    Proyecto <span class="text-indigo-600">Píxeles</span>
+                </h1>
+                <div id="user-status" class="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider">
+                    Participando
+                </div>
+            </div>
+            
+            <p class="text-sm text-gray-600 leading-snug mb-3">
+                Selecciona un punto estratégico para intervenir. <br>
+                <span class="font-medium text-gray-800"><i class="fa-solid fa-circle-info text-indigo-500"></i> Solo puedes colocar 1 píxel.</span>
+            </p>
+            
+            <div class="flex items-center gap-2 text-xs font-medium text-indigo-700 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-100">
+                <i class="fa-solid fa-hand-pointer animate-bounce"></i>
+                Toca el mapa para proponer tu píxel.
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal para Nueva Propuesta -->
+    <div id="proposal-modal" class="ui-interactive fixed inset-0 bg-gray-900/60 backdrop-blur-sm hidden items-center justify-center p-4 transition-opacity z-[2000]">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md transform scale-95 transition-transform duration-200 overflow-hidden">
+            <div class="bg-gray-50 px-5 py-4 border-b border-gray-100 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-gray-800">Definir Intervención</h3>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-red-500 transition-colors w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-200">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            
+            <div class="p-5">
+                <!-- Descripción Opcional -->
+                <div>
+                    <label for="pixel-desc" class="block text-sm font-medium text-gray-700 mb-2">
+                        ¿Qué imaginas aquí? <span class="text-gray-400 font-normal text-xs">(Opcional)</span>
+                    </label>
+                    <textarea id="pixel-desc" rows="4" class="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all resize-none" placeholder="Ej. Un asiento abrazando el árbol, baldosas interactivas con historia..."></textarea>
+                </div>
+            </div>
+
+            <!-- Botones -->
+            <div class="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
+                <button onclick="closeModal()" class="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 hover:bg-gray-200 rounded-lg transition-colors">Cancelar</button>
+                <button onclick="saveProposal()" class="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-colors flex items-center gap-2">
+                    <i class="fa-solid fa-check"></i> Plantar Píxel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Mensaje Toast UI -->
+    <div id="toast" class="ui-layer z-[3000] fixed top-5 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-3 transition-all duration-300 opacity-0 pointer-events-none -translate-y-4 max-w-[90vw] text-center">
+        <i id="toast-icon" class="fa-solid fa-circle-check text-green-400 text-lg"></i>
+        <span id="toast-msg" class="text-sm font-medium"></span>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ideaton-pixeles-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        
+        let app, db, auth, userId;
+        let map;
+        let tempPopup = null;
+        let selectedLatLng = null;
+        let hasVoted = false;
+        let pixelsData = {}; // Evitamos duplicados por ID
+
+        // Exponer funciones al window para los botones HTML
+        window.proceedToProposal = proceedToProposal;
+        window.cancelTempPixel = cancelTempPixel;
+        window.openModal = openModal;
+        window.closeModal = closeModal;
+        window.saveProposal = saveProposal;
+
+        async function initApp() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (token) {
+                    await signInWithCustomToken(auth, token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser?.uid || crypto.randomUUID();
+                
+                initMap();
+                listenToPixels();
+            } catch (error) {
+                console.error("Error al iniciar la base de datos:", error);
+                userId = crypto.randomUUID();
+                initMap();
+            }
+        }
+
+        function initMap() {
+            const cordobaCenter = [-31.4170, -64.1895]; 
+            const cordobaBounds = [
+                [-31.4900, -64.2900],
+                [-31.3100, -64.0800]
+            ];
+            
+            map = L.map('map', {
+                zoomControl: false,
+                tap: true, 
+                maxBounds: cordobaBounds, 
+                maxBoundsViscosity: 1.0,  
+                minZoom: 12               
+            }).setView(cordobaCenter, 16);
+
+            L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
+
+            map.on('click', handleMapClick);
+        }
+
+        function listenToPixels() {
+            if (!db) return;
+            const pixelsRef = collection(db, 'artifacts', appId, 'public', 'data', 'pixels');
+            
+            onSnapshot(query(pixelsRef), (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added" || change.type === "modified") {
+                        const pixel = change.doc.data();
+                        pixel.id = change.doc.id;
+                        
+                        if (!pixelsData[pixel.id]) {
+                            pixelsData[pixel.id] = pixel;
+                            renderPixelOnMap(pixel);
+                            
+                            // Si detecto que este píxel bajado de la nube fue creado por mí, bloqueo la opción de volver a votar
+                            if (pixel.userId === userId) {
+                                hasVoted = true;
+                                updateUIForVotedUser();
+                            }
+                        }
+                    }
+                });
+            }, (error) => {
+                console.error("Error escuchando cambios:", error);
+            });
+        }
+
+        function handleMapClick(e) {
+            if (hasVoted) {
+                showToast('Ya has plantado tu píxel. Solo se permite uno por persona.', true);
+                return;
+            }
+
+            selectedLatLng = e.latlng;
+            if (tempPopup) map.removeLayer(tempPopup);
+
+            const confirmationHtml = `
+                <div class="text-center p-1">
+                    <button onclick="window.proceedToProposal()" class="w-12 h-12 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full flex items-center justify-center shadow-lg transition-transform transform hover:scale-105 mx-auto cursor-pointer">
+                        <i class="fa-solid fa-check text-xl"></i>
+                    </button>
+                </div>
+            `;
+
+            tempPopup = L.popup({
+                closeButton: false,
+                autoPanPadding: [50, 50],
+                className: 'bg-transparent'
+            })
+            .setLatLng(selectedLatLng)
+            .setContent(confirmationHtml)
+            .openOn(map);
+
+            map.panTo(selectedLatLng);
+        }
+
+        function proceedToProposal() {
+            if (tempPopup) map.removeLayer(tempPopup);
+            openModal();
+        }
+
+        function cancelTempPixel() {
+            if (tempPopup) {
+                map.removeLayer(tempPopup);
+                tempPopup = null;
+            }
+        }
+
+        const modal = document.getElementById('proposal-modal');
+        const modalContent = modal.querySelector('div');
+
+        function openModal() {
+            document.getElementById('pixel-desc').value = '';
+            
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            setTimeout(() => {
+                modal.classList.remove('opacity-0');
+                modalContent.classList.remove('scale-95');
+                modalContent.classList.add('scale-100');
+            }, 10);
+        }
+
+        function closeModal() {
+            modal.classList.add('opacity-0');
+            modalContent.classList.remove('scale-100');
+            modalContent.classList.add('scale-95');
+            
+            setTimeout(() => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }, 200);
+            cancelTempPixel();
+        }
+
+        async function saveProposal() {
+            if (!userId) {
+                showToast('Hubo un error de conexión, intenta recargar.', true);
+                return;
+            }
+
+            const desc = document.getElementById('pixel-desc').value.trim();
+            const newPixelId = Date.now().toString() + Math.floor(Math.random() * 1000);
+            
+            const newPixel = {
+                id: newPixelId,
+                lat: selectedLatLng.lat,
+                lng: selectedLatLng.lng,
+                description: desc,
+                timestamp: new Date().toISOString(),
+                userId: userId 
+            };
+
+            // Bloqueo optimista inmediato
+            hasVoted = true;
+            updateUIForVotedUser();
+            cancelTempPixel();
+            closeModal();
+
+            if (db) {
+                try {
+                    const pixelsRef = collection(db, 'artifacts', appId, 'public', 'data', 'pixels');
+                    const docRef = doc(pixelsRef, newPixel.id);
+                    await setDoc(docRef, newPixel);
+                    showToast('¡Tu píxel fue guardado y compartido con todos!');
+                } catch (error) {
+                    console.error("Error guardando:", error);
+                    showToast('Hubo un error al guardar tu píxel.', true);
+                    hasVoted = false; // Revertir si falla el guardado
+                }
+            } else {
+                pixelsData[newPixel.id] = newPixel;
+                renderPixelOnMap(newPixel);
+                showToast('¡Tu píxel ha sido plantado!');
+            }
+        }
+
+        function updateUIForVotedUser() {
+            document.getElementById('user-status').innerText = 'Píxel Plantado';
+            document.getElementById('user-status').className = 'bg-gray-100 text-gray-500 text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider';
+        }
+
+        function renderPixelOnMap(pixel) {
+            const isMine = pixel.userId === userId;
+            
+            const icon = L.divIcon({
+                // Si el píxel es tuyo, le agrega un borde verde tenue para diferenciarlo ligeramente
+                className: `pixel-marker placed ${isMine ? 'ring-2 ring-green-400 ring-offset-1' : ''}`,
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            });
+
+            const marker = L.marker([pixel.lat, pixel.lng], { icon: icon }).addTo(map);
+            
+            const displayDesc = pixel.description 
+                ? `"${pixel.description}"` 
+                : '<em class="text-gray-400 text-xs">Voto de ubicación estratégico (Sin detalle)</em>';
+            
+            const popupContent = `
+                <div class="p-2 min-w-[160px] max-w-[200px]">
+                    <div class="text-xs font-bold mb-2 border-b border-gray-200 pb-1 ${isMine ? 'text-green-600' : 'text-indigo-700'}">
+                        <i class="fa-solid ${isMine ? 'fa-user-check' : 'fa-location-dot'}"></i> ${isMine ? 'Tu Píxel' : 'Píxel Intervenido'}
+                    </div>
+                    <div class="text-sm text-gray-700 italic leading-snug">${displayDesc}</div>
+                </div>
+            `;
+            
+            marker.bindPopup(popupContent, { closeButton: false });
+            
+            marker.on('popupopen', function() {
+                this.getElement().classList.add('active');
+            });
+
+            marker.on('popupclose', function() {
+                this.getElement().classList.remove('active');
+            });
+        }
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            const msgEl = document.getElementById('toast-msg');
+            const icon = document.getElementById('toast-icon');
+            
+            msgEl.innerText = message;
+            
+            if (isError) {
+                icon.className = 'fa-solid fa-circle-exclamation text-red-400 text-lg';
+            } else {
+                icon.className = 'fa-solid fa-circle-check text-green-400 text-lg';
+            }
+
+            toast.classList.remove('opacity-0', '-translate-y-4');
+            toast.classList.add('opacity-100', 'translate-y-0');
+
+            setTimeout(() => {
+                toast.classList.remove('opacity-100', 'translate-y-0');
+                toast.classList.add('opacity-0', '-translate-y-4');
+            }, 3500);
+        }
+
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
+</body>
+</html>
