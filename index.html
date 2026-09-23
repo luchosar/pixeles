@@ -68,7 +68,7 @@
             
             <div class="flex items-center gap-2 text-xs font-medium text-indigo-700 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-100">
                 <i class="fa-solid fa-hand-pointer animate-bounce"></i>
-                Toca el mapa para proponer tu píxel.
+                Toca el mapa para proponer tu píxel o reubicarlo.
             </div>
         </div>
     </div>
@@ -76,7 +76,7 @@
     <div id="proposal-modal" class="ui-interactive fixed inset-0 bg-gray-900/60 backdrop-blur-sm hidden items-center justify-center p-4 transition-opacity z-[2000]">
         <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md transform scale-95 transition-transform duration-200 overflow-hidden">
             <div class="bg-gray-50 px-5 py-4 border-b border-gray-100 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-gray-800">Definir Intervención</h3>
+                <h3 id="modal-title" class="text-lg font-bold text-gray-800">Definir Intervención</h3>
                 <button onclick="closeModal()" class="text-gray-400 hover:text-red-500 transition-colors w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-200">
                     <i class="fa-solid fa-xmark text-xl"></i>
                 </button>
@@ -91,8 +91,8 @@
 
             <div class="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
                 <button onclick="closeModal()" class="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 hover:bg-gray-200 rounded-lg transition-colors">Cancelar</button>
-                <button onclick="saveProposal()" class="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-colors flex items-center gap-2">
-                    <i class="fa-solid fa-check"></i> Plantar Píxel
+                <button onclick="saveProposal()" id="modal-btn-save" class="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-colors flex items-center gap-2">
+                    <span id="modal-btn-text"><i class="fa-solid fa-check"></i> Plantar Píxel</span>
                 </button>
             </div>
         </div>
@@ -110,7 +110,7 @@
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
-        // Aquí están tus llaves reales de Firebase inyectadas
+        // Tus llaves reales de Firebase
         const firebaseConfig = {
             apiKey: "AIzaSyAefsPiKFg9k6h6HOU1hXN8AxFoESkPwWg",
             authDomain: "proyecto-pixeles-fb433.firebaseapp.com",
@@ -123,8 +123,13 @@
 
         let app, db, auth, userId;
         let map, tempPopup = null, selectedLatLng = null;
-        let hasVoted = false;
+        
+        // Variables para controlar si el usuario ya tiene un píxel y cuál es su ID
+        let myPixelId = null;
+        let myCurrentDescription = "";
+        
         let pixelsData = {}; 
+        let markers = {}; 
 
         window.proceedToProposal = proceedToProposal;
         window.cancelTempPixel = cancelTempPixel;
@@ -145,8 +150,7 @@
                 listenToPixels();
             } catch (error) {
                 console.error("Aviso Firebase:", error);
-                showToast("Modo local activado. Verifica configuración de Firebase.", true);
-                userId = "local-" + Date.now();
+                showToast("Error de conexión. Verifica configuración de Firebase.", true);
             }
         }
 
@@ -163,7 +167,7 @@
                 maxBounds: cordobaBounds, 
                 maxBoundsViscosity: 1.0,  
                 minZoom: 12               
-            }).setView(cordobaCenter, 16);
+            }).setView(cordobaCenter, 14); 
 
             L.control.zoom({ position: 'bottomright' }).addTo(map);
 
@@ -181,30 +185,40 @@
             
             onSnapshot(query(pixelsRef), (snapshot) => {
                 snapshot.docChanges().forEach((change) => {
+                    const pixel = change.doc.data();
+                    pixel.id = change.doc.id;
+
                     if (change.type === "added" || change.type === "modified") {
-                        const pixel = change.doc.data();
-                        pixel.id = change.doc.id;
-                        
-                        if (!pixelsData[pixel.id]) {
-                            pixelsData[pixel.id] = pixel;
-                            renderPixelOnMap(pixel);
-                            
-                            if (pixel.userId === userId) {
-                                hasVoted = true;
-                                updateUIForVotedUser();
-                            }
+                        // Si el píxel fue modificado (movido), borramos el pin viejo del mapa antes de redibujarlo
+                        if (markers[pixel.id]) {
+                            map.removeLayer(markers[pixel.id]);
                         }
+                        
+                        pixelsData[pixel.id] = pixel;
+                        renderPixelOnMap(pixel);
+                        
+                        // Si el píxel entrante es mío, guardamos sus datos para futuras ediciones
+                        if (pixel.userId === userId) {
+                            myPixelId = pixel.id;
+                            myCurrentDescription = pixel.description || "";
+                            updateUIForVotedUser();
+                        }
+                    }
+                    
+                    if (change.type === "removed") {
+                        if (markers[pixel.id]) {
+                            map.removeLayer(markers[pixel.id]);
+                            delete markers[pixel.id];
+                        }
+                        delete pixelsData[pixel.id];
                     }
                 });
             });
         }
 
         function handleMapClick(e) {
-            if (hasVoted) {
-                showToast('Ya has plantado tu píxel. Solo se permite uno por persona.', true);
-                return;
-            }
-
+            // Ya no bloqueamos la acción si el usuario tiene un píxel. 
+            // Simplemente le permitimos elegir un nuevo punto para reubicarlo.
             selectedLatLng = e.latlng;
             if (tempPopup) map.removeLayer(tempPopup);
 
@@ -244,7 +258,21 @@
         const modalContent = modal.querySelector('div');
 
         function openModal() {
-            document.getElementById('pixel-desc').value = '';
+            const descInput = document.getElementById('pixel-desc');
+            const modalTitle = document.getElementById('modal-title');
+            const modalBtnText = document.getElementById('modal-btn-text');
+
+            // Adaptamos la ventana según si está creando o reubicando
+            if (myPixelId) {
+                descInput.value = myCurrentDescription;
+                modalTitle.innerText = "Reubicar Intervención";
+                modalBtnText.innerHTML = '<i class="fa-solid fa-arrows-up-down-left-right"></i> Actualizar Píxel';
+            } else {
+                descInput.value = '';
+                modalTitle.innerText = "Definir Intervención";
+                modalBtnText.innerHTML = '<i class="fa-solid fa-check"></i> Plantar Píxel';
+            }
+
             modal.classList.remove('hidden');
             modal.classList.add('flex');
             setTimeout(() => {
@@ -267,10 +295,11 @@
 
         async function saveProposal() {
             const desc = document.getElementById('pixel-desc').value.trim();
-            const newPixelId = Date.now().toString();
+            // Si ya tiene un píxel, usamos su ID existente. Si es nuevo, generamos uno.
+            const pixelIdToSave = myPixelId || Date.now().toString();
             
-            const newPixel = {
-                id: newPixelId,
+            const pixelData = {
+                id: pixelIdToSave,
                 lat: selectedLatLng.lat,
                 lng: selectedLatLng.lng,
                 description: desc,
@@ -278,20 +307,18 @@
                 userId: userId 
             };
 
-            hasVoted = true;
-            updateUIForVotedUser();
-            cancelTempPixel();
             closeModal();
+            cancelTempPixel();
 
             if (db) {
                 try {
-                    const docRef = doc(collection(db, 'pixels'), newPixel.id);
-                    await setDoc(docRef, newPixel);
-                    showToast('¡Tu píxel fue guardado en la nube!');
+                    // setDoc con merge:true sobreescribe los datos manteniendo el mismo ID en la base de datos
+                    const docRef = doc(db, 'pixels', pixelIdToSave);
+                    await setDoc(docRef, pixelData, { merge: true });
+                    showToast(myPixelId ? '¡Tu píxel ha sido reubicado!' : '¡Tu píxel fue guardado en la nube!');
                 } catch (error) {
                     console.error("Error guardando:", error);
                     showToast('Hubo un error al guardar tu píxel.', true);
-                    hasVoted = false; 
                 }
             }
         }
@@ -312,6 +339,7 @@
             });
 
             const marker = L.marker([pixel.lat, pixel.lng], { icon: icon }).addTo(map);
+            markers[pixel.id] = marker; 
             
             const displayDesc = pixel.description 
                 ? `"${pixel.description}"` 
@@ -350,8 +378,5 @@
 
         window.addEventListener('DOMContentLoaded', initApp);
     </script>
-    <script src="//cdn.jsdelivr.net/npm/eruda"></script>
-    <script>eruda.init();</script>
-
 </body>
 </html>
